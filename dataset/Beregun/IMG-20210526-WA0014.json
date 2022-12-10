@@ -222,16 +222,16 @@
       "label": "meter",
       "points": [
         [
-          166.9019607843137,
-          262.7450980392157
+          582.0,
+          680.0
         ],
         [
-          959,
-          1082
+          266.0,
+          956.0
         ]
       ],
       "group_id": null,
-      "shape_type": "rectangle",
+      "shape_type": "circle",
       "flags": {}
     }
   ],
