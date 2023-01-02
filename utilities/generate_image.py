@@ -12,16 +12,32 @@ import json
 import math
 import numpy as np
 import random
+from types import SimpleNamespace
 
-METER_CLASS_NAME = "meter"
-SHAPE_TAG = "shapes"
-LABEL_TAG = "label"
-POINTS_TAG = "points"
-SHAPE_TYPE_TAG = "shape_type"
-CIRCLE_SHAPE_TYPE = "circle"
-RANDOM_SEED = 13
-GENERATOR_IMAGE_SIZE = (1280, 720)
-random.seed(13)
+from sympy import solve
+from sympy.abc import x, y
+
+config_file = str(os.path.dirname(__file__)) + os.path.sep + 'default_generator_config.json'
+with open(config_file, 'r') as f:
+    config = json.load(f, object_hook=lambda d: SimpleNamespace(**d))
+random.seed(config.RANDOM_SEED)
+
+class FixedGeneratorConfig():
+
+    alpha = 0.
+    beta = 0.
+    gamma = 0.
+    x_displacement = 0.5
+    y_displacement = 0.5
+    zoom = 1.0
+
+    def __init__(self, alpha, beta, gamma, x_displacement, y_displacement, zoom):
+        self.alpha = alpha
+        self.beta = beta
+        self.gamma = gamma
+        self.x_displacement = x_displacement
+        self.y_displacement = y_displacement
+        self.zoom = zoom
 
 
 def get_file_list(root_path: str, glob_mask: str) -> list:
@@ -50,7 +66,7 @@ def select_inside_circle(shapes_list: list, circle_points):
     filtered_shapes = []
     for shape in shapes_list:
         inside_flag = True
-        for point in shape[POINTS_TAG]:
+        for point in shape[config.POINTS_TAG]:
             if math.dist(point, circle_points[0]) > radius:
                 inside_flag = False
                 break
@@ -67,16 +83,16 @@ def shift_shape(shape_points: list, vector):
 
 def shift_shapes(shapes_list: list, vector):
     for shape in shapes_list:
-        shift_shape(shape[POINTS_TAG], vector)
+        shift_shape(shape[config.POINTS_TAG], vector)
 
 
 def draw_shapes(image, shape_list: list):
     for shape in shape_list:
-        integer_points = [[int(point[0]), int(point[1])] for point in shape[POINTS_TAG]]
-        if shape[SHAPE_TYPE_TAG] == "circle":
-            radius = math.dist(shape[POINTS_TAG][0], shape[POINTS_TAG][1])
+        integer_points = [[int(point[0]), int(point[1])] for point in shape[config.POINTS_TAG]]
+        if shape[config.SHAPE_TYPE_TAG] == "circle":
+            radius = math.dist(shape[config.POINTS_TAG][0], shape[config.POINTS_TAG][1])
             cv2.circle(image, integer_points[0], int(radius), (255, 0, 0), 2)
-        elif shape[SHAPE_TYPE_TAG] == "polygon":
+        elif shape[config.SHAPE_TYPE_TAG] == "polygon":
             for i in range(-1, len(integer_points) - 1):
                 cv2.line(image, integer_points[i], integer_points[i + 1], (0, 255, 0), 2)
 
@@ -93,12 +109,12 @@ def append_meters_image_and_info(file_path: str, image_info_list: list):
 
     with open(file_path) as f:
         json_content = json.load(f)
-        if SHAPE_TAG in json_content:
-            for shape in json_content[SHAPE_TAG]:
-                if shape[LABEL_TAG] == METER_CLASS_NAME:
-                    if shape[SHAPE_TYPE_TAG] != CIRCLE_SHAPE_TYPE:
+        if config.SHAPE_TAG in json_content:
+            for shape in json_content[config.SHAPE_TAG]:
+                if shape[config.LABEL_TAG] == config.METER_CLASS_NAME:
+                    if shape[config.SHAPE_TYPE_TAG] != config.CIRCLE_SHAPE_TYPE:
                         continue
-                    circle_points = shape[POINTS_TAG]
+                    circle_points = shape[config.POINTS_TAG]
                     circle_bounding_rect = circle_to_rect(circle_points)
                     jpg_path = str(pathlib.Path(file_path).with_suffix(".jpg"))
                     meter_whole_image = cv2.imread(jpg_path, cv2.IMREAD_COLOR)
@@ -106,26 +122,112 @@ def append_meters_image_and_info(file_path: str, image_info_list: list):
                     meter_image = meter_whole_image[circle_bounding_rect[0][1]:circle_bounding_rect[1][1],
                                                     circle_bounding_rect[0][0]:circle_bounding_rect[1][0]]
 
-                    shapes = select_inside_circle(json_content[SHAPE_TAG], circle_points)
+                    shapes = select_inside_circle(json_content[config.SHAPE_TAG], circle_points)
                     shift_shapes(shapes, circle_bounding_rect[0])
                     image_info_list.append((meter_image, circle_points, shapes))
 
-                    # draw_shapes(meter_image, shapes)
-                    # cv2.imshow("Test", meter_image)
-                    # cv2.waitKey(0)
+def show_demo_window(meter_images, background_images, generator_config=config):
+    DEMO_WINDOW_NAME = "Demo window"
+    cv2.namedWindow(DEMO_WINDOW_NAME)
+    controls = [attr for attr in dir(FixedGeneratorConfig)
+                if not callable(getattr(FixedGeneratorConfig, attr)) and not attr.startswith("__")]
+    def nothing(x):
+        None
 
+    for control in controls:
+        cv2.createTrackbar(control, DEMO_WINDOW_NAME, 50, 100, nothing)
 
-def generate_random_image(meter_images, background_images, size=GENERATOR_IMAGE_SIZE):
-    background_source = random.choice(background_images)
+    def get_pos(bar_name, interval):
+        return cv2.getTrackbarPos(bar_name, DEMO_WINDOW_NAME)/ 100.0 * (interval[1] - interval[0]) + interval[0]
+
+    while True:
+        fixed_config = FixedGeneratorConfig(
+            get_pos("alpha", config.ALPHA_INTERVAL),
+            get_pos("beta", config.BETA_INTERVAL),
+            get_pos("gamma", config.GAMMA_INTERVAL),
+            get_pos("x_displacement", config.X_INTERVAL),
+            get_pos("y_displacement", config.Y_INTERVAL),
+            get_pos("zoom", config.ZOOM_INTERVAL)
+        )
+
+        generated_image = generate_random_image(meter_images, backgrounds, generator_config, fixed_config=fixed_config)
+        cv2.imshow(DEMO_WINDOW_NAME, generated_image)
+        key = cv2.waitKey(40)
+        if key == 27 or key == 20 or key == 13:
+            break
+
+def generate_random_image(meter_images, background_images, generator_config=config,
+                          fixed_config : FixedGeneratorConfig = None):
+    size = tuple(generator_config.GENERATOR_IMAGE_SIZE)
+    background_source = background_images[0] #random.choice(background_images)
     background = cv2.resize(background_source, size, cv2.INTER_CUBIC)
     background = cv2.cvtColor(background, cv2.COLOR_BGR2BGRA)
-    meter_image_source, circle, shapes = random.choice(meter_images)
+    meter_image_source, circle, shapes = meter_images[0] #random.choice(meter_images)
+
+    if fixed_config is None:
+        alpha = random.uniform(config.ALPHA_INTERVAL[0], config.ALPHA_INTERVAL[1])
+        beta = random.uniform(config.BETA_INTERVAL[0], config.BETA_INTERVAL[1])
+        gamma = random.uniform(config.GAMMA_INTERVAL[0], config.GAMMA_INTERVAL[1])
+        x_displacement = random.uniform(config.X_INTERVAL[0], config.X_INTERVAL[1]) * size[0]
+        y_displacement = random.uniform(config.Y_INTERVAL[0], config.Y_INTERVAL[1]) * size[1]
+        zoom_coefficient = random.uniform(config.ZOOM_INTERVAL[0], config.ZOOM_INTERVAL[1])
+    else:
+        alpha = fixed_config.alpha
+        beta = fixed_config.beta
+        gamma = fixed_config.gamma
+        x_displacement = fixed_config.x_displacement * size[0]
+        y_displacement = fixed_config.y_displacement * size[1]
+        zoom_coefficient = fixed_config.zoom
 
     meter_image = cv2.cvtColor(meter_image_source, cv2.COLOR_BGR2BGRA)
     mask = np.zeros(meter_image_source.shape[:2], np.uint8)
-    cv2.circle(mask, (int(circle[0][0]), int(circle[0][1])), int(math.dist(circle[0], circle[1])), 255, -1)
+    x_c = circle[0][0]
+    y_c = circle[0][1]
+    R = math.dist(circle[0], circle[1])
+    cv2.circle(mask, (int(x_c), int(y_c)), int(R), 255, -1)
     meter_image[:, :, 3] = mask
-    M = np.array([[1., 0., 200.], [0., 1., 200.], [0, 0, 1.]])
+    M_alpha = np.array([[ math.cos(alpha), math.sin(alpha), 0.],
+                        [-math.sin(alpha), math.cos(alpha), 0.],
+                        [ 0., 0., 1.]])
+    M_beta = np.array([[ math.cos(beta), 0., math.sin(beta)],
+                       [ 0.,             1., 0.],
+                       [-math.sin(beta), 0., math.cos(beta)]])
+    M_gamma = np.array([[ 1., 0., 0.],
+                        [ 0., math.cos(gamma), math.sin(gamma)],
+                        [ 0.,-math.sin(gamma), math.cos(gamma)]])
+    M_rot = np.matmul(M_alpha, np.matmul(M_beta, M_gamma))
+
+    M_2d_rot = M_rot[0:2, 0:2]
+    M_2d_b   = M_rot[0:2, 2]
+    M_inv    = np.linalg.inv(M_2d_rot)
+    b = np.matmul(M_2d_rot, np.array([x_c, y_c])) - M_2d_b
+
+    ellipse = (M_inv[0, 0] * x + M_inv[0, 1] * y) ** 2 + (M_inv[1, 0] * x + M_inv[1, 1] * y) ** 2 - R*R
+    tangent_x = M_inv[0, 1] * (M_inv[0, 0] * x + M_inv[0, 1] * y) + M_inv[1, 1] * (M_inv[1, 0] * x + M_inv[1, 1] * y)
+    tangent_points_x = solve([tangent_x, ellipse], dict=True)
+    tangent_y = M_inv[0, 0] * (M_inv[0, 0] * x + M_inv[0, 1] * y) + M_inv[1, 0] * (M_inv[1, 0] * x + M_inv[1, 1] * y)
+    tangent_points_y = solve([tangent_y, ellipse], dict=True)
+
+    x_left   = np.array([float(tangent_points_x[0][x])+b[0], float(tangent_points_x[0][y])+b[1]])
+    x_right  = np.array([float(tangent_points_x[1][x])+b[0], float(tangent_points_x[1][y])+b[1]])
+    y_top    = np.array([float(tangent_points_y[0][x])+b[0], float(tangent_points_y[0][y])+b[1]])
+    y_bottom = np.array([float(tangent_points_y[1][x])+b[0], float(tangent_points_y[1][y])+b[1]])
+
+    meter_image_width = abs(x_right[0] - x_left[0]) + 1
+    meter_image_height = abs(y_bottom[1] - y_top[1]) + 1
+    x_c_new = (x_left[0] + x_right[0]) / 2
+    y_c_new = (y_top[1] + y_bottom[1]) / 2
+    background_size = min(size[0], size[1])
+    meter_image_size = max(meter_image_width, meter_image_height)
+    zoom = zoom_coefficient * background_size / meter_image_size
+    x_shift = -x_c_new + x_displacement / zoom
+    y_shift = -y_c_new + y_displacement / zoom
+
+    M_rot[2, :] = [0., 0., 1.]
+    M_shift_and_zoom = np.array([[1., 0., x_shift],
+                                 [0., 1., y_shift],
+                                 [0., 0., 1/zoom]])
+    M = np.matmul(M_shift_and_zoom, M_rot)
     generated_image = cv2.warpPerspective(meter_image, M, size,
                                           flags=cv2.INTER_LINEAR, borderMode=cv2.BORDER_CONSTANT,
                                           borderValue=(0, 0, 0, 0))
@@ -135,11 +237,16 @@ def generate_random_image(meter_images, background_images, size=GENERATOR_IMAGE_
         generated_image[:, :, i] = ((np.multiply(background[:, :, i].astype(np.uint16), 255 - mask) +
                                      np.multiply(generated_image[:, :, i].astype(np.uint16), mask)) / 255
                                     ).astype(np.uint8)
+    x_left = (x_left[0] - x_c_new) * zoom + x_displacement
+    x_right = (x_right[0] - x_c_new) * zoom + x_displacement
+    y_top = (y_top[1] - y_c_new) * zoom + y_displacement
+    y_bottom = (y_bottom[1] - y_c_new) * zoom + y_displacement
 
-    cv2.imshow("Background", background)
-    cv2.imshow("Generated image", generated_image)
-    cv2.imshow("Mask", mask)
-    cv2.waitKey(0)
+    cv2.rectangle(generated_image, (int(x_left), int(y_top)), (int(x_right), int(y_bottom)), (255, 0, 0), 3)
+
+    # cv2.imshow("Background", background)
+    # cv2.imshow("Generated image", generated_image)
+    # cv2.imshow("Mask", mask)
 
     return generated_image
 
@@ -182,4 +289,5 @@ if __name__ == '__main__':
     for file in dataset_jsons:
         append_meters_image_and_info(file, meter_images)
 
-    generated_image = generate_random_image(meter_images, backgrounds)
+    show_demo_window(meter_images, backgrounds)
+
