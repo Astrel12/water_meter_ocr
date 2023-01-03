@@ -14,8 +14,6 @@ import numpy as np
 import random
 from types import SimpleNamespace
 
-from sympy import solve
-from sympy.abc import x, y
 
 config_file = str(os.path.dirname(__file__)) + os.path.sep + 'default_generator_config.json'
 with open(config_file, 'r') as f:
@@ -156,6 +154,55 @@ def show_demo_window(meter_images, background_images, generator_config=config):
         if key == 27 or key == 20 or key == 13:
             break
 
+
+def find_tangent_points(M_quad, R, M, b):
+    from sympy import solve
+    from sympy.abc import x, y
+    ellipse = M_quad[0, 0] * x ** 2 + (M_quad[0, 1] + M_quad[1, 0]) * x * y + M_quad[1, 1] * y ** 2 - R*R
+    tangent_x = M[0, 1] * (M[0, 0] * x + M[0, 1] * y) + M[1, 1] * (M[1, 0] * x + M[1, 1] * y)
+    tangent_points_x = solve([tangent_x, ellipse], dict=True)
+    tangent_y = M[0, 0] * (M[0, 0] * x + M[0, 1] * y) + M[1, 0] * (M[1, 0] * x + M[1, 1] * y)
+    tangent_points_y = solve([tangent_y, ellipse], dict=True)
+    x_left   = np.array([float(tangent_points_x[0][x])+b[0], float(tangent_points_x[0][y])+b[1]])
+    x_right  = np.array([float(tangent_points_x[1][x])+b[0], float(tangent_points_x[1][y])+b[1]])
+    y_top    = np.array([float(tangent_points_y[0][x])+b[0], float(tangent_points_y[0][y])+b[1]])
+    y_bottom = np.array([float(tangent_points_y[1][x])+b[0], float(tangent_points_y[1][y])+b[1]])
+    return x_left, x_right, y_top, y_bottom
+
+
+def solve_equations(M_quad, R, D, E):
+    A = M_quad[0, 0]
+    B = M_quad[0, 1] + M_quad[1, 0]
+    C = M_quad[1, 1]
+    if abs(D) > abs(E):
+        swap_flag = True
+        D, E = E, D
+        A, C = C, A
+    else:
+        swap_flag = False
+    # y = - D/E x
+    A = A - D * B / E + D * D / E / E * C
+    C = - R * R
+    if -C/A < 0:
+        raise ValueError("Equations have no roots")
+    x = math.sqrt(-C/A)
+    y = - D / E * x
+    if swap_flag:
+        x, y = y, x
+    solution = np.array([x, y])
+    return -solution, solution
+
+
+def find_tangent_points_honest(M_quad, R, M, b):
+    D = M[0, 1] * M[0, 0] + M[1, 1] * M[1, 0]
+    E = M[0, 1] * M[0, 1] + M[1, 1] * M[1, 1]
+    x_left, x_right = solve_equations(M_quad, R, D, E)
+    D = M[0, 0] * M[0, 0] + M[1, 0] * M[1, 0]
+    E = M[0, 0] * M[0, 1] + M[1, 0] * M[1, 1]
+    y_top, y_bottom = solve_equations(M_quad, R, D, E)
+    return x_left + b, x_right + b, y_top + b, y_bottom + b
+
+
 def generate_random_image(meter_images, background_images, generator_config=config,
                           fixed_config : FixedGeneratorConfig = None):
     size = tuple(generator_config.GENERATOR_IMAGE_SIZE)
@@ -200,20 +247,11 @@ def generate_random_image(meter_images, background_images, generator_config=conf
     M_2d_rot = M_rot[0:2, 0:2]
     M_2d_b   = M_rot[0:2, 2]
     M_inv    = np.linalg.inv(M_2d_rot)
+    M_quad   = np.matmul(M_inv.transpose(), M_inv)
     b = np.matmul(M_2d_rot, np.array([x_c, y_c])) - M_2d_b
+    x_left, x_right, y_top, y_bottom = find_tangent_points_honest(M_quad, R, M_inv, b)
 
-    ellipse = (M_inv[0, 0] * x + M_inv[0, 1] * y) ** 2 + (M_inv[1, 0] * x + M_inv[1, 1] * y) ** 2 - R*R
-    tangent_x = M_inv[0, 1] * (M_inv[0, 0] * x + M_inv[0, 1] * y) + M_inv[1, 1] * (M_inv[1, 0] * x + M_inv[1, 1] * y)
-    tangent_points_x = solve([tangent_x, ellipse], dict=True)
-    tangent_y = M_inv[0, 0] * (M_inv[0, 0] * x + M_inv[0, 1] * y) + M_inv[1, 0] * (M_inv[1, 0] * x + M_inv[1, 1] * y)
-    tangent_points_y = solve([tangent_y, ellipse], dict=True)
-
-    x_left   = np.array([float(tangent_points_x[0][x])+b[0], float(tangent_points_x[0][y])+b[1]])
-    x_right  = np.array([float(tangent_points_x[1][x])+b[0], float(tangent_points_x[1][y])+b[1]])
-    y_top    = np.array([float(tangent_points_y[0][x])+b[0], float(tangent_points_y[0][y])+b[1]])
-    y_bottom = np.array([float(tangent_points_y[1][x])+b[0], float(tangent_points_y[1][y])+b[1]])
-
-    meter_image_width = abs(x_right[0] - x_left[0]) + 1
+    meter_image_width = abs(x_left[0] - x_right[0]) + 1
     meter_image_height = abs(y_bottom[1] - y_top[1]) + 1
     x_c_new = (x_left[0] + x_right[0]) / 2
     y_c_new = (y_top[1] + y_bottom[1]) / 2
@@ -288,6 +326,5 @@ if __name__ == '__main__':
 
     for file in dataset_jsons:
         append_meters_image_and_info(file, meter_images)
-
     show_demo_window(meter_images, backgrounds)
 
