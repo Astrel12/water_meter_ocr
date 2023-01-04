@@ -6,7 +6,8 @@ Random water image generator
 import argparse
 import os
 import glob
-import cv2
+# weired form of import for autocompletion
+from cv2 import cv2
 import pathlib
 import json
 import math
@@ -20,14 +21,19 @@ with open(config_file, 'r') as f:
     config = json.load(f, object_hook=lambda d: SimpleNamespace(**d))
 random.seed(config.RANDOM_SEED)
 
-class FixedGeneratorConfig():
 
-    alpha = 0.
-    beta = 0.
-    gamma = 0.
-    x_displacement = 0.5
-    y_displacement = 0.5
-    zoom = 1.0
+class FixedGeneratorConfig:
+    """
+    Class-structure with input parameters for function generate_random image
+
+    Member variables describe water meter position in background
+    """
+    alpha = 0.  # rotation angle ("Oz axis")
+    beta = 0.   # tilt with respect to Ox axis
+    gamma = 0.  # tilt with respecto to Oy axis
+    x_displacement = 0.5  # horizontal displacement of center in units of ratio of image width
+    y_displacement = 0.5  # vertical displacement of center in units of ratio of image height
+    zoom = 1.0  # zoom of imprinted to background water meter image
 
     def __init__(self, alpha, beta, gamma, x_displacement, y_displacement, zoom):
         self.alpha = alpha
@@ -39,6 +45,13 @@ class FixedGeneratorConfig():
 
 
 def get_file_list(root_path: str, glob_mask: str) -> list:
+    """
+    Scans folder recursively for files matching GLOB
+
+    :param root_path: path to root folder to scan
+    :param glob_mask: GLOB expression for files to search
+    :return: list of matched files
+    """
     file_list = []
     for path, dirs, files in os.walk(root_path):
         for file in glob.glob(path + os.sep + glob_mask):
@@ -47,6 +60,12 @@ def get_file_list(root_path: str, glob_mask: str) -> list:
 
 
 def circle_to_rect(circle_points):
+    """
+    Transforms circle to its bounding box
+
+    :param circle_points: list or tuple, first element is center of circle, second element is arbitrary point of circle
+    :return: [left_top, right_bottom] list of points of bounding box frame
+    """
     radius = math.dist(circle_points[0], circle_points[1])
     rect_point1 = [int(circle_points[0][0] - radius), int(circle_points[0][1] - radius)]
     rect_point2 = [int(circle_points[0][0] + radius), int(circle_points[0][1] + radius)]
@@ -54,12 +73,23 @@ def circle_to_rect(circle_points):
 
 
 def clip_rect_by_image_shape(rect, size):
+    """
+    Clips all rectangles to image size
+    :param rect: list of rectangles
+    :param size: [height, width] (or (height, width) of image
+    """
     for point in rect:
         point[0] = np.clip(point[0], 0, size[1])
         point[1] = np.clip(point[1], 0, size[0])
 
 
-def select_inside_circle(shapes_list: list, circle_points):
+def select_inside_circle(shapes_list: list, circle_points) -> list:
+    """
+    Selects only shapes inside circle
+    :param shapes_list: list of lists of points of shapes
+    :param circle_points: [center, arbitrary point of circle]
+    :return: filtered list of shapes
+    """
     radius = math.dist(circle_points[0], circle_points[1])
     filtered_shapes = []
     for shape in shapes_list:
@@ -74,17 +104,34 @@ def select_inside_circle(shapes_list: list, circle_points):
 
 
 def shift_shape(shape_points: list, vector):
+    """
+    Shifts all points in list
+    :param shape_points: list of shape points
+    :param vector size: of displacement
+    Procedure changes shape_points inplace
+    """
     for point in shape_points:
         point[0] = point[0] - vector[0]
         point[1] = point[1] - vector[1]
 
 
 def shift_shapes(shapes_list: list, vector):
+    """
+    Calls shift_shape for all of input shapes
+    :param shapes_list: shapes container list
+    :param vector: displacement
+    Changes shapes_list inplace
+    """
     for shape in shapes_list:
         shift_shape(shape[config.POINTS_TAG], vector)
 
 
 def draw_shapes(image, shape_list: list):
+    """
+    Draws shapes in image
+    :param image: cv2.Mat
+    :param shape_list: shapes to draw
+    """
     for shape in shape_list:
         integer_points = [[int(point[0]), int(point[1])] for point in shape[config.POINTS_TAG]]
         if shape[config.SHAPE_TYPE_TAG] == "circle":
@@ -124,19 +171,36 @@ def append_meters_image_and_info(file_path: str, image_info_list: list):
                     shift_shapes(shapes, circle_bounding_rect[0])
                     image_info_list.append((meter_image, circle_points, shapes))
 
+
 def show_demo_window(meter_images, background_images, generator_config=config):
+    """
+    Debug interactive function
+    :param meter_images: images for generator random choice
+    :param background_images: background images for generator random choice
+    :param generator_config: configuration parameters of generator
+    """
     DEMO_WINDOW_NAME = "Demo window"
     cv2.namedWindow(DEMO_WINDOW_NAME)
     controls = [attr for attr in dir(FixedGeneratorConfig)
                 if not callable(getattr(FixedGeneratorConfig, attr)) and not attr.startswith("__")]
+
     def nothing(x):
+        """
+        Trackbar callback doing nothing
+        """
         None
 
     for control in controls:
         cv2.createTrackbar(control, DEMO_WINDOW_NAME, 50, 100, nothing)
 
     def get_pos(bar_name, interval):
-        return cv2.getTrackbarPos(bar_name, DEMO_WINDOW_NAME)/ 100.0 * (interval[1] - interval[0]) + interval[0]
+        """
+        Transforms value of trackbar to corespondent value of FixedGeneratorConfig
+        :param bar_name: name of trackbar control
+        :param interval: [min, max] for conversion of trackbar value which is within [0,100] interval
+        :return: value within [min, max] interval
+        """
+        return cv2.getTrackbarPos(bar_name, DEMO_WINDOW_NAME) / 100.0 * (interval[1] - interval[0]) + interval[0]
 
     while True:
         fixed_config = FixedGeneratorConfig(
@@ -156,6 +220,16 @@ def show_demo_window(meter_images, background_images, generator_config=config):
 
 
 def find_tangent_points(M_quad, R, M, b):
+    """
+    Finds points of ellipse for calculating its bounding box
+
+    Slow sympy solution
+    :param M_quad: matrix of quadratic form function (r^T M_quad r - R^2 = 0 is ellipse equation)
+    :param R: radius of circle, transformed to ellipse with M matrix
+    :param M: transformation matrix, M_quad=M^T M
+    :param b: shift due to transformation and circle position
+    :return: list with left, right, top and bottom points of ellipse
+    """
     from sympy import solve
     from sympy.abc import x, y
     ellipse = M_quad[0, 0] * x ** 2 + (M_quad[0, 1] + M_quad[1, 0]) * x * y + M_quad[1, 1] * y ** 2 - R*R
@@ -171,6 +245,19 @@ def find_tangent_points(M_quad, R, M, b):
 
 
 def solve_equations(M_quad, R, D, E):
+    """
+    Solves system of two linear and quadratic equations
+
+    r = [x, y]^T
+    r^T M_quad r - R^2 = 0
+    r^T * [D, E] = 0
+
+    :param M_quad: matrix of quadratic form function
+    :param R: radius of transformed circle
+    :param D: parameter of linear equation, D*x + E*y=0
+    :param E: parameter of linear equation, D*x + E*y=0
+    :return: list of solutions [x,y]
+    """
     A = M_quad[0, 0]
     B = M_quad[0, 1] + M_quad[1, 0]
     C = M_quad[1, 1]
@@ -194,6 +281,16 @@ def solve_equations(M_quad, R, D, E):
 
 
 def find_tangent_points_honest(M_quad, R, M, b):
+    """
+    Finds points of ellipse for calculating its bounding box
+
+    Direct fast solution
+    :param M_quad: matrix of quadratic form function (r^T M_quad r - R^2 = 0 is ellipse equation)
+    :param R: radius of circle, transformed to ellipse with M matrix
+    :param M: transformation matrix, M_quad=M^T M
+    :param b: shift due to transformation and circle position
+    :return: list with left, right, top and bottom points of ellipse
+    """
     D = M[0, 1] * M[0, 0] + M[1, 1] * M[1, 0]
     E = M[0, 1] * M[0, 1] + M[1, 1] * M[1, 1]
     x_left, x_right = solve_equations(M_quad, R, D, E)
@@ -203,8 +300,17 @@ def find_tangent_points_honest(M_quad, R, M, b):
     return x_left + b, x_right + b, y_top + b, y_bottom + b
 
 
-def generate_random_image(meter_images, background_images, generator_config=config,
-                          fixed_config : FixedGeneratorConfig = None):
+def generate_random_image(meter_images: list, background_images: list, generator_config: dict = config,
+                          fixed_config: FixedGeneratorConfig = None):
+    """
+    Generates random image with water meter
+    :param meter_images: list of woter meter images with annotations for random selection to imprint
+    :param background_images: list of backgrounds for random choice
+    :param generator_config: various parameters with limits for random selection of rotations, displacement, zoom and
+    other options of imprint process
+    :param fixed_config: FixedGeneratorConfig class, overrides random selection if set
+    :return: image with randomly selected background and several randomly placed water meters, and its annotation
+    """
     size = tuple(generator_config.GENERATOR_IMAGE_SIZE)
     background_source = background_images[0] #random.choice(background_images)
     background = cv2.resize(background_source, size, cv2.INTER_CUBIC)
