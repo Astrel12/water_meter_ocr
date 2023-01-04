@@ -7,13 +7,14 @@ import argparse
 import os
 import glob
 # weired form of import for autocompletion
-from cv2 import cv2
+import cv2
 import pathlib
 import json
 import math
 import numpy as np
 import random
 from types import SimpleNamespace
+import copy
 
 
 config_file = str(os.path.dirname(__file__)) + os.path.sep + 'default_generator_config.json'
@@ -42,6 +43,23 @@ class FixedGeneratorConfig:
         self.x_displacement = x_displacement
         self.y_displacement = y_displacement
         self.zoom = zoom
+
+class ImageWithAnnotation:
+    """
+    Container for image and its description
+    """
+
+    def __init__(self, meter_image, circle_points, shapes, water_meter_class):
+        self.image = meter_image.copy()
+        self.circle_points = circle_points.copy()
+        self.shapes = copy.deepcopy(shapes)
+        self.class_name = water_meter_class
+
+    def set_meter_rectangle(self, x_left, x_right, y_top, y_bottom):
+        for shape in self.shapes:
+            if shape[config.LABEL_TAG] == config.METER_CLASS_NAME:
+                shape[config.SHAPE_TYPE_TAG] = "rectangle"
+                shape[config.POINTS_TAG] = [[x_left, y_top], [x_right, y_bottom]]
 
 
 def get_file_list(root_path: str, glob_mask: str) -> list:
@@ -140,18 +158,38 @@ def draw_shapes(image, shape_list: list):
         elif shape[config.SHAPE_TYPE_TAG] == "polygon":
             for i in range(-1, len(integer_points) - 1):
                 cv2.line(image, integer_points[i], integer_points[i + 1], (0, 255, 0), 2)
+        elif shape[config.SHAPE_TYPE_TAG] == "rectangle":
+            cv2.rectangle(image, integer_points[0], integer_points[1], (0, 0, 255), 2)
 
-        cv2.putText(image, shape["label"], integer_points[0], cv2.FONT_HERSHEY_SIMPLEX, 1, (255, 255, 0), 2)
+        cv2.putText(image, shape["label"], integer_points[-1], cv2.FONT_HERSHEY_SIMPLEX, 1, (255, 255, 0), 2)
 
 
-def append_meters_image_and_info(file_path: str, image_info_list: list):
+def get_water_meter_class(root_path: str, file_path: str) -> str:
+    """
+    Returns class of water meter
+    :param root_path: root dataset folder
+    :param file_path: json path with labelme annotation
+    :return: eigther first subfolder of dataset root path, or parent folder name of file_path, if root path
+    is set directly to folder with json file
+    """
+    relative_path = os.path.relpath(file_path, root_path)
+    path_parts = relative_path.split(os.sep)
+    if len(path_parts) > 1:
+        return path_parts[0]
+    else:
+        dirname = os.path.dirname(file_path)
+        return os.path.basename(dirname)
+
+
+def append_meters_image_and_info(root_path: str, file_path: str, image_info_list: list):
     """
     Parses labelme json file, search "meter" objects in it, saves information from json to dict
 
+    :param root_path: root path of dataset, used for water meter class assignment (first subdirectory name)
     :param file_path: path to json file
     :param image_info_list: list with meter images
     """
-
+    water_meter_class = get_water_meter_class(root_path, file_path)
     with open(file_path) as f:
         json_content = json.load(f)
         if config.SHAPE_TAG in json_content:
@@ -169,14 +207,35 @@ def append_meters_image_and_info(file_path: str, image_info_list: list):
 
                     shapes = select_inside_circle(json_content[config.SHAPE_TAG], circle_points)
                     shift_shapes(shapes, circle_bounding_rect[0])
-                    image_info_list.append((meter_image, circle_points, shapes))
+                    image_info_list.append(ImageWithAnnotation(meter_image, circle_points, shapes, water_meter_class))
 
 
-def show_demo_window(meter_images, background_images, generator_config=config):
+def collect_chars_map(meter_images: list) -> dict:
+    """
+    Collects character shapes in meter_images for quick random selection of specific characters in generator
+    :param meter_images: water meter images with annotation
+    :return: map from class and character label of water meter image to list of references to image content and shape
+     descriptions
+    """
+    char_map = dict()
+    for image in meter_images:
+        for shape in image.shapes:
+            label = shape[config.LABEL_TAG]
+            if label not in [config.METER_CLASS_NAME, config.VALUE_CLASS_NAME] and '.' not in label:
+                if image.class_name not in char_map.keys():
+                    char_map[image.class_name] = dict()
+                if label not in char_map[image.class_name].keys():
+                    char_map[image.class_name][label] = list()
+                char_map[image.class_name][label].append((image.image, shape))
+    return char_map
+
+
+def show_demo_window(meter_images: list, background_images: list, character_map: dict, generator_config=config):
     """
     Debug interactive function
     :param meter_images: images for generator random choice
     :param background_images: background images for generator random choice
+    :param character_map: mapping of class and character labels to images and shape descriptions with polygons
     :param generator_config: configuration parameters of generator
     """
     DEMO_WINDOW_NAME = "Demo window"
@@ -184,14 +243,8 @@ def show_demo_window(meter_images, background_images, generator_config=config):
     controls = [attr for attr in dir(FixedGeneratorConfig)
                 if not callable(getattr(FixedGeneratorConfig, attr)) and not attr.startswith("__")]
 
-    def nothing(x):
-        """
-        Trackbar callback doing nothing
-        """
-        None
-
     for control in controls:
-        cv2.createTrackbar(control, DEMO_WINDOW_NAME, 50, 100, nothing)
+        cv2.createTrackbar(control, DEMO_WINDOW_NAME, 50, 100, lambda x: None)
 
     def get_pos(bar_name, interval):
         """
@@ -211,9 +264,10 @@ def show_demo_window(meter_images, background_images, generator_config=config):
             get_pos("y_displacement", config.Y_INTERVAL),
             get_pos("zoom", config.ZOOM_INTERVAL)
         )
-
-        generated_image = generate_random_image(meter_images, backgrounds, generator_config, fixed_config=fixed_config)
-        cv2.imshow(DEMO_WINDOW_NAME, generated_image)
+        generated_image = generate_random_image(meter_images, background_images, character_map,
+                                                generator_config, fixed_config=fixed_config)
+        draw_shapes(generated_image.image, generated_image.shapes)
+        cv2.imshow(DEMO_WINDOW_NAME, generated_image.image)
         key = cv2.waitKey(40)
         if key == 27 or key == 20 or key == 13:
             break
@@ -300,45 +354,9 @@ def find_tangent_points_honest(M_quad, R, M, b):
     return x_left + b, x_right + b, y_top + b, y_bottom + b
 
 
-def generate_random_image(meter_images: list, background_images: list, generator_config: dict = config,
-                          fixed_config: FixedGeneratorConfig = None):
-    """
-    Generates random image with water meter
-    :param meter_images: list of woter meter images with annotations for random selection to imprint
-    :param background_images: list of backgrounds for random choice
-    :param generator_config: various parameters with limits for random selection of rotations, displacement, zoom and
-    other options of imprint process
-    :param fixed_config: FixedGeneratorConfig class, overrides random selection if set
-    :return: image with randomly selected background and several randomly placed water meters, and its annotation
-    """
-    size = tuple(generator_config.GENERATOR_IMAGE_SIZE)
-    background_source = background_images[0] #random.choice(background_images)
-    background = cv2.resize(background_source, size, cv2.INTER_CUBIC)
-    background = cv2.cvtColor(background, cv2.COLOR_BGR2BGRA)
-    meter_image_source, circle, shapes = meter_images[0] #random.choice(meter_images)
+def calculate_transform_parameters(alpha, beta, gamma, x_displacement, y_displacement, zoom_coefficient,
+                                   x_c, y_c, R, size):
 
-    if fixed_config is None:
-        alpha = random.uniform(config.ALPHA_INTERVAL[0], config.ALPHA_INTERVAL[1])
-        beta = random.uniform(config.BETA_INTERVAL[0], config.BETA_INTERVAL[1])
-        gamma = random.uniform(config.GAMMA_INTERVAL[0], config.GAMMA_INTERVAL[1])
-        x_displacement = random.uniform(config.X_INTERVAL[0], config.X_INTERVAL[1]) * size[0]
-        y_displacement = random.uniform(config.Y_INTERVAL[0], config.Y_INTERVAL[1]) * size[1]
-        zoom_coefficient = random.uniform(config.ZOOM_INTERVAL[0], config.ZOOM_INTERVAL[1])
-    else:
-        alpha = fixed_config.alpha
-        beta = fixed_config.beta
-        gamma = fixed_config.gamma
-        x_displacement = fixed_config.x_displacement * size[0]
-        y_displacement = fixed_config.y_displacement * size[1]
-        zoom_coefficient = fixed_config.zoom
-
-    meter_image = cv2.cvtColor(meter_image_source, cv2.COLOR_BGR2BGRA)
-    mask = np.zeros(meter_image_source.shape[:2], np.uint8)
-    x_c = circle[0][0]
-    y_c = circle[0][1]
-    R = math.dist(circle[0], circle[1])
-    cv2.circle(mask, (int(x_c), int(y_c)), int(R), 255, -1)
-    meter_image[:, :, 3] = mask
     M_alpha = np.array([[ math.cos(alpha), math.sin(alpha), 0.],
                         [-math.sin(alpha), math.cos(alpha), 0.],
                         [ 0., 0., 1.]])
@@ -372,6 +390,57 @@ def generate_random_image(meter_images: list, background_images: list, generator
                                  [0., 1., y_shift],
                                  [0., 0., 1/zoom]])
     M = np.matmul(M_shift_and_zoom, M_rot)
+    x_left = (x_left[0] - x_c_new) * zoom + x_displacement
+    x_right = (x_right[0] - x_c_new) * zoom + x_displacement
+    y_top = (y_top[1] - y_c_new) * zoom + y_displacement
+    y_bottom = (y_bottom[1] - y_c_new) * zoom + y_displacement
+    return M, x_left, x_right, y_top, y_bottom
+
+
+def generate_random_image(meter_images: list, background_images: list, character_map: dict,
+                          generator_config: dict = config, fixed_config: FixedGeneratorConfig = None):
+    """
+    Generates random image with water meter
+    :param meter_images: list of woter meter images with annotations for random selection to imprint
+    :param background_images: list of backgrounds for random choice
+    :param character_map: mapping of class and character labels to images and shape descriptions with polygons
+    :param generator_config: various parameters with limits for random selection of rotations, displacement, zoom and
+    other options of imprint process
+    :param fixed_config: FixedGeneratorConfig class, overrides random selection if set
+    :return: image with randomly selected background and several randomly placed water meters, and its annotation
+    """
+    size = tuple(generator_config.GENERATOR_IMAGE_SIZE)
+    background_source = random.choice(background_images)
+    background = cv2.resize(background_source, size, cv2.INTER_CUBIC)
+    background = cv2.cvtColor(background, cv2.COLOR_BGR2BGRA)
+    image = random.choice(meter_images)
+    meter_image_source, circle, shapes = image.image, image.circle_points, image.shapes
+
+    if fixed_config is None:
+        alpha = random.uniform(config.ALPHA_INTERVAL[0], config.ALPHA_INTERVAL[1])
+        beta = random.uniform(config.BETA_INTERVAL[0], config.BETA_INTERVAL[1])
+        gamma = random.uniform(config.GAMMA_INTERVAL[0], config.GAMMA_INTERVAL[1])
+        x_displacement = random.uniform(config.X_INTERVAL[0], config.X_INTERVAL[1]) * size[0]
+        y_displacement = random.uniform(config.Y_INTERVAL[0], config.Y_INTERVAL[1]) * size[1]
+        zoom_coefficient = random.uniform(config.ZOOM_INTERVAL[0], config.ZOOM_INTERVAL[1])
+    else:
+        alpha = fixed_config.alpha
+        beta = fixed_config.beta
+        gamma = fixed_config.gamma
+        x_displacement = fixed_config.x_displacement * size[0]
+        y_displacement = fixed_config.y_displacement * size[1]
+        zoom_coefficient = fixed_config.zoom
+
+    meter_image = cv2.cvtColor(meter_image_source, cv2.COLOR_BGR2BGRA)
+    mask = np.zeros(meter_image_source.shape[:2], np.uint8)
+    x_c = circle[0][0]
+    y_c = circle[0][1]
+    R = math.dist(circle[0], circle[1])
+    cv2.circle(mask, (int(x_c), int(y_c)), int(R), 255, -1)
+    meter_image[:, :, 3] = mask
+    M, x_left, x_right, y_top, y_bottom\
+        = calculate_transform_parameters(alpha, beta, gamma, x_displacement, y_displacement, zoom_coefficient,
+                                         x_c, y_c, R, size)
     generated_image = cv2.warpPerspective(meter_image, M, size,
                                           flags=cv2.INTER_LINEAR, borderMode=cv2.BORDER_CONSTANT,
                                           borderValue=(0, 0, 0, 0))
@@ -381,18 +450,15 @@ def generate_random_image(meter_images: list, background_images: list, generator
         generated_image[:, :, i] = ((np.multiply(background[:, :, i].astype(np.uint16), 255 - mask) +
                                      np.multiply(generated_image[:, :, i].astype(np.uint16), mask)) / 255
                                     ).astype(np.uint8)
-    x_left = (x_left[0] - x_c_new) * zoom + x_displacement
-    x_right = (x_right[0] - x_c_new) * zoom + x_displacement
-    y_top = (y_top[1] - y_c_new) * zoom + y_displacement
-    y_bottom = (y_bottom[1] - y_c_new) * zoom + y_displacement
+    generated_image_with_annotations = ImageWithAnnotation(generated_image, circle, shapes, image.class_name)
+    #from cv2 import cv2
+    for shape in generated_image_with_annotations.shapes:
+        points_in = np.array(shape[config.POINTS_TAG]).reshape(-1, 1, 2)
+        points_out = cv2.perspectiveTransform(points_in, M)
+        shape[config.POINTS_TAG] = points_out.reshape(-1, 2).tolist()
+    generated_image_with_annotations.set_meter_rectangle(x_left, x_right, y_top, y_bottom)
 
-    cv2.rectangle(generated_image, (int(x_left), int(y_top)), (int(x_right), int(y_bottom)), (255, 0, 0), 3)
-
-    # cv2.imshow("Background", background)
-    # cv2.imshow("Generated image", generated_image)
-    # cv2.imshow("Mask", mask)
-
-    return generated_image
+    return generated_image_with_annotations
 
 
 if __name__ == '__main__':
@@ -421,16 +487,15 @@ if __name__ == '__main__':
 
     backgrounds = []
     meter_images = []
-
-    background_files = [random.choice(background_files)]
-    dataset_jsons = [random.choice(dataset_jsons)]
-
     for file in background_files:
         bg_image = cv2.imread(file, cv2.IMREAD_COLOR)
         caption = "Background " + pathlib.Path(file).name
         backgrounds.append(bg_image)
 
     for file in dataset_jsons:
-        append_meters_image_and_info(file, meter_images)
-    show_demo_window(meter_images, backgrounds)
+        append_meters_image_and_info(args.dataset_path, file, meter_images)
+
+    characters_map = collect_chars_map(meter_images)
+
+    show_demo_window(meter_images, backgrounds, characters_map)
 

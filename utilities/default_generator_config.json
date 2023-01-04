@@ -1,5 +1,6 @@
 {
   "METER_CLASS_NAME" : "meter",
+  "VALUE_CLASS_NAME" : "value",
   "SHAPE_TAG" : "shapes",
   "LABEL_TAG" : "label",
   "POINTS_TAG" : "points",
