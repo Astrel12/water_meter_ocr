@@ -6,7 +6,6 @@ Random water image generator
 import argparse
 import os
 import glob
-# weired form of import for autocompletion
 import cv2
 import pathlib
 import json
@@ -17,10 +16,18 @@ from types import SimpleNamespace
 import copy
 
 
-config_file = str(os.path.dirname(__file__)) + os.path.sep + 'default_generator_config.json'
-with open(config_file, 'r') as f:
-    config = json.load(f, object_hook=lambda d: SimpleNamespace(**d))
-random.seed(config.RANDOM_SEED)
+def read_config_file():
+    """
+    Function reads config from json file (should be placed in module folder) to structure with correspondent members
+    """
+    config_file = str(os.path.dirname(__file__)) + os.path.sep + 'default_generator_config.json'
+    with open(config_file, 'r') as f:
+        config_content = json.load(f, object_hook=lambda d: SimpleNamespace(**d))
+    random.seed(config_content.RANDOM_SEED)
+    return config_content
+
+
+config = read_config_file()  # called both in __main__ and in __init__
 
 
 class FixedGeneratorConfig:
@@ -31,7 +38,7 @@ class FixedGeneratorConfig:
     """
     alpha = 0.  # rotation angle ("Oz axis")
     beta = 0.   # tilt with respect to Ox axis
-    gamma = 0.  # tilt with respecto to Oy axis
+    gamma = 0.  # tilt with respect to Oy axis
     x_displacement = 0.5  # horizontal displacement of center in units of ratio of image width
     y_displacement = 0.5  # vertical displacement of center in units of ratio of image height
     zoom = 1.0  # zoom of imprinted to background water meter image
@@ -66,7 +73,7 @@ def get_file_list(root_path: str, glob_mask: str) -> list:
     """
     Scans folder recursively for files matching GLOB
 
-    :param root_path: path to root folder to scan
+    :param root_path: path to root folder for recursive scanning
     :param glob_mask: GLOB expression for files to search
     :return: list of matched files
     """
@@ -81,7 +88,8 @@ def circle_to_rect(circle_points):
     """
     Transforms circle to its bounding box
 
-    :param circle_points: list or tuple, first element is center of circle, second element is arbitrary point of circle
+    :param circle_points: list or tuples, first element is the center of circle, second element is the arbitrary
+    point of circle
     :return: [left_top, right_bottom] list of points of bounding box frame
     """
     radius = math.dist(circle_points[0], circle_points[1])
@@ -125,7 +133,7 @@ def shift_shape(shape_points: list, vector):
     """
     Shifts all points in list
     :param shape_points: list of shape points
-    :param vector size: of displacement
+    :param vector: size of displacement
     Procedure changes shape_points inplace
     """
     for point in shape_points:
@@ -135,13 +143,22 @@ def shift_shape(shape_points: list, vector):
 
 def shift_shapes(shapes_list: list, vector):
     """
-    Calls shift_shape for all of input shapes
+    Calls shift_shape for all input shapes
     :param shapes_list: shapes container list
     :param vector: displacement
     Changes shapes_list inplace
     """
     for shape in shapes_list:
         shift_shape(shape[config.POINTS_TAG], vector)
+
+
+def put_text_up_right(image, text, point, font, scale, color, thickness):
+    """
+    Same as putText, but base point is up right text position
+    """
+    size = cv2.getTextSize(text, font, scale, thickness)
+    cv2.putText(image, text, (point[0] - size[0][0], point[1] + size[0][1] +
+                              size[1]), font, scale, color, thickness)
 
 
 def draw_shapes(image, shape_list: list):
@@ -154,14 +171,18 @@ def draw_shapes(image, shape_list: list):
         integer_points = [[int(point[0]), int(point[1])] for point in shape[config.POINTS_TAG]]
         if shape[config.SHAPE_TYPE_TAG] == "circle":
             radius = math.dist(shape[config.POINTS_TAG][0], shape[config.POINTS_TAG][1])
-            cv2.circle(image, integer_points[0], int(radius), (255, 0, 0), 2)
+            color = (255, 0, 0)
+            cv2.circle(image, integer_points[0], int(radius), color, 2)
         elif shape[config.SHAPE_TYPE_TAG] == "polygon":
+            color = (0, 255, 0)
             for i in range(-1, len(integer_points) - 1):
-                cv2.line(image, integer_points[i], integer_points[i + 1], (0, 255, 0), 2)
+                cv2.line(image, integer_points[i], integer_points[i + 1], color, 2)
         elif shape[config.SHAPE_TYPE_TAG] == "rectangle":
-            cv2.rectangle(image, integer_points[0], integer_points[1], (0, 0, 255), 2)
-
-        cv2.putText(image, shape["label"], integer_points[-1], cv2.FONT_HERSHEY_SIMPLEX, 1, (255, 255, 0), 2)
+            color = (0, 0, 255)
+            cv2.rectangle(image, integer_points[0], integer_points[1], color, 2)
+        label = shape[config.LABEL_TAG]
+        if label != "value":
+            put_text_up_right(image, label, integer_points[-1], cv2.FONT_HERSHEY_SIMPLEX, 1, color, 2)
 
 
 def get_water_meter_class(root_path: str, file_path: str) -> str:
@@ -169,7 +190,7 @@ def get_water_meter_class(root_path: str, file_path: str) -> str:
     Returns class of water meter
     :param root_path: root dataset folder
     :param file_path: json path with labelme annotation
-    :return: eigther first subfolder of dataset root path, or parent folder name of file_path, if root path
+    :return: either first subfolder of dataset root path, or parent folder name of file_path, if root path
     is set directly to folder with json file
     """
     relative_path = os.path.relpath(file_path, root_path)
@@ -177,8 +198,8 @@ def get_water_meter_class(root_path: str, file_path: str) -> str:
     if len(path_parts) > 1:
         return path_parts[0]
     else:
-        dirname = os.path.dirname(file_path)
-        return os.path.basename(dirname)
+        dir_name = os.path.dirname(file_path)
+        return os.path.basename(dir_name)
 
 
 def append_meters_image_and_info(root_path: str, file_path: str, image_info_list: list):
@@ -210,6 +231,15 @@ def append_meters_image_and_info(root_path: str, file_path: str, image_info_list
                     image_info_list.append(ImageWithAnnotation(meter_image, circle_points, shapes, water_meter_class))
 
 
+def is_shape_digit(label):
+    """
+    Checks if shape label is digit (character)
+    :param label: shape label
+    :return: True if label is not "meter" or "value" (or may be something else in future)
+    """
+    return label not in [config.METER_CLASS_NAME, config.VALUE_CLASS_NAME]
+
+
 def collect_chars_map(meter_images: list) -> dict:
     """
     Collects character shapes in meter_images for quick random selection of specific characters in generator
@@ -221,7 +251,7 @@ def collect_chars_map(meter_images: list) -> dict:
     for image in meter_images:
         for shape in image.shapes:
             label = shape[config.LABEL_TAG]
-            if label not in [config.METER_CLASS_NAME, config.VALUE_CLASS_NAME] and '.' not in label:
+            if is_shape_digit(label) and '.' not in label:
                 if image.class_name not in char_map.keys():
                     char_map[image.class_name] = dict()
                 if label not in char_map[image.class_name].keys():
@@ -397,11 +427,58 @@ def calculate_transform_parameters(alpha, beta, gamma, x_displacement, y_displac
     return M, x_left, x_right, y_top, y_bottom
 
 
+def imprint_random_digit(image, meter_class, shape, character_map):
+    """
+    Places random digit image from character_map to the place described by shape
+    :param image: image to modify
+    :param shape: description of position where to imprint random digit (shape description will be changed too)
+    :param meter_class: class of water meter, to select proper variants from character_map
+    :param character_map:  mapping of class and character labels to images and shape descriptions with polygons
+    """
+    if meter_class not in character_map.keys():
+        return
+    label = shape[config.LABEL_TAG]
+    if label.startswith('r'):
+        digits_to_select = [l for l in character_map[meter_class].keys() if l.startswith('r')]
+    else:
+        digits_to_select = [l for l in character_map[meter_class].keys() if not l.startswith('r')]
+    if len(digits_to_select) == 0:
+        return
+    source_label = random.choice(digits_to_select)
+    source_image, source_shape = random.choice(character_map[meter_class][source_label])
+    points_source = np.array(source_shape[config.POINTS_TAG])
+    points_dest = np.array(shape[config.POINTS_TAG])
+    if points_source.shape[0] != 4 or points_dest.shape[0] != 4:
+        return  # incorrect polygons in annotation
+    size = np.array([image.shape[1], image.shape[0]])
+    digit_min_bounds = points_dest.min(axis=0)
+    digit_max_bounds = points_dest.max(axis=0)
+    crop_image_min = np.clip(digit_min_bounds - config.DIGIT_IMPRINT_SMOOTH_RADIUS, [0, 0], size).astype(int)
+    crop_image_max = np.clip(digit_max_bounds + config.DIGIT_IMPRINT_SMOOTH_RADIUS, [0, 0], size).astype(int)
+    if crop_image_min[0] == crop_image_max[0] or crop_image_min[1] == crop_image_max[1]:
+        return  # digit is out of image
+    sub_image = image[crop_image_min[1]:crop_image_max[1], crop_image_min[0]:crop_image_max[0], :]
+    temp_size = (sub_image.shape[1], sub_image.shape[0])
+    points_dest = points_dest - np.array([crop_image_min[0], crop_image_min[1]])
+    M = cv2.getPerspectiveTransform(points_source.astype("float32"), points_dest.astype("float32"))
+    sub_image_temp = cv2.warpPerspective(source_image, M, temp_size,
+                                         flags=cv2.INTER_LINEAR, borderMode=cv2.BORDER_CONSTANT,
+                                         borderValue=(0, 0, 0, 0))
+    mask = np.zeros((sub_image.shape[0], sub_image.shape[1], 1), dtype=np.uint8)
+    cv2.fillPoly(mask, points_dest.astype(int).reshape(1, -1, 2), 255)
+    mask = cv2.blur(mask, (config.DIGIT_IMPRINT_SMOOTH_RADIUS // 2, config.DIGIT_IMPRINT_SMOOTH_RADIUS // 2))
+    for i in range(3):
+        sub_image[:, :, i] = ((np.multiply(sub_image[:, :, i].astype(np.uint16), 255 - mask) +
+                               np.multiply(sub_image_temp[:, :, i].astype(np.uint16), mask)) // 255
+                              ).astype(np.uint8)
+    shape[config.LABEL_TAG] = source_label
+
+
 def generate_random_image(meter_images: list, background_images: list, character_map: dict,
                           generator_config: dict = config, fixed_config: FixedGeneratorConfig = None):
     """
     Generates random image with water meter
-    :param meter_images: list of woter meter images with annotations for random selection to imprint
+    :param meter_images: list of water meter images with annotations for random selection to imprint
     :param background_images: list of backgrounds for random choice
     :param character_map: mapping of class and character labels to images and shape descriptions with polygons
     :param generator_config: various parameters with limits for random selection of rotations, displacement, zoom and
@@ -451,17 +528,22 @@ def generate_random_image(meter_images: list, background_images: list, character
                                      np.multiply(generated_image[:, :, i].astype(np.uint16), mask)) / 255
                                     ).astype(np.uint8)
     generated_image_with_annotations = ImageWithAnnotation(generated_image, circle, shapes, image.class_name)
-    #from cv2 import cv2
     for shape in generated_image_with_annotations.shapes:
         points_in = np.array(shape[config.POINTS_TAG]).reshape(-1, 1, 2)
         points_out = cv2.perspectiveTransform(points_in, M)
         shape[config.POINTS_TAG] = points_out.reshape(-1, 2).tolist()
+        if is_shape_digit(shape[config.LABEL_TAG]):
+            imprint_random_digit(generated_image_with_annotations.image, image.class_name, shape, character_map)
     generated_image_with_annotations.set_meter_rectangle(x_left, x_right, y_top, y_bottom)
 
     return generated_image_with_annotations
 
 
-if __name__ == '__main__':
+def main():
+    """
+    Function to hide variables from global module space
+    """
+
     parser = argparse.ArgumentParser(description='Takes images from dateset folder, '
                                                  'extracts water meter images from them '
                                                  'using given annotations, places it randomly on '
@@ -473,29 +555,27 @@ if __name__ == '__main__':
     parser.add_argument('--output_path', metavar='<output_path>', type=str,
                         help='Path to output folder', required=True)
     args = parser.parse_args()
-
     print(f"Dataset folder: {args.dataset_path}\n"
           f"Background folder: {args.backgrounds_path}\n"
           f"Output folder: {args.output_path}")
-
     dataset_jsons = get_file_list(args.dataset_path, "*.json")
     dataset_jsons.sort()
     background_files = get_file_list(args.backgrounds_path, "*.jpg")
     background_files.sort()
     print("Dataset files: ", dataset_jsons)
     print("Background files: ", background_files)
-
     backgrounds = []
     meter_images = []
     for file in background_files:
         bg_image = cv2.imread(file, cv2.IMREAD_COLOR)
-        caption = "Background " + pathlib.Path(file).name
         backgrounds.append(bg_image)
-
     for file in dataset_jsons:
         append_meters_image_and_info(args.dataset_path, file, meter_images)
-
     characters_map = collect_chars_map(meter_images)
-
     show_demo_window(meter_images, backgrounds, characters_map)
+
+
+if __name__ == '__main__':
+    main()
+
 
