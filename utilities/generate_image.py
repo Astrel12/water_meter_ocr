@@ -205,6 +205,27 @@ def get_water_meter_class(root_path: str, file_path: str) -> str:
         return os.path.basename(dir_name)
 
 
+def distance_to_line(line: np.array, point):
+    return np.linalg.norm(np.cross(line[1] - line[0], line[0] - point))/np.linalg.norm(line[1] - line[0])
+
+
+def line_intersection(line1, line2):
+    xdiff = (line1[0][0] - line1[1][0], line2[0][0] - line2[1][0])
+    ydiff = (line1[0][1] - line1[1][1], line2[0][1] - line2[1][1])
+
+    def det(a, b):
+        return a[0] * b[1] - a[1] * b[0]
+
+    div = det(xdiff, ydiff)
+    if div == 0:
+        raise ValueError('lines do not intersect')
+
+    d = (det(*line1), det(*line2))
+    x = det(d, xdiff) / div
+    y = det(d, ydiff) / div
+    return [x, y]
+
+
 def normalize_annotation(image: ImageWithAnnotation):
     """
     Corrects some of user errors in annotation: angles inaccuracies, rectangles instead of polygons, polygons start points
@@ -275,9 +296,6 @@ def normalize_annotation(image: ImageWithAnnotation):
             first_edge = second_edge
         second_edge = get_poly_edge(start_index + 2)
 
-        def distance_to_line(line: np.array, point):
-            return np.linalg.norm(np.cross(line[1] - line[0], line[0] - point))/np.linalg.norm(line[1] - line[0])
-
         distance_to_line1 = distance_to_line(line, first_edge[0]) + distance_to_line(line, first_edge[1])
         distance_to_line2 = distance_to_line(line, second_edge[0]) + distance_to_line(line, second_edge[1])
         if distance_to_line1 > distance_to_line2:
@@ -288,10 +306,19 @@ def normalize_annotation(image: ImageWithAnnotation):
 
     reorder_along_line(value_shape, [[0., 0.], [1., 0.]])
     base_line = np.array([value_shape[config.POINTS_TAG][0], value_shape[config.POINTS_TAG][1]])
+    base_line_down = np.array([value_shape[config.POINTS_TAG][3], value_shape[config.POINTS_TAG][2]])
     for shape in image.shapes:
-        if shape[config.LABEL_TAG] in [config.VALUE_CLASS_NAME, config.METER_CLASS_NAME]:
+        if shape[config.LABEL_TAG] in [config.VALUE_CLASS_NAME, config.METER_CLASS_NAME] \
+                or len(shape[config.POINTS_TAG]) != 4:
             continue
         reorder_along_line(shape, base_line)
+        if distance_to_line(base_line_down, shape[config.POINTS_TAG][2]) > config.BASE_LINE_DISTANCE_THRESHOLD:
+            shape[config.POINTS_TAG][2] = line_intersection(base_line_down,
+                                                            [shape[config.POINTS_TAG][1], shape[config.POINTS_TAG][2]])
+        if distance_to_line(base_line_down, shape[config.POINTS_TAG][3]) > config.BASE_LINE_DISTANCE_THRESHOLD:
+            shape[config.POINTS_TAG][3] = line_intersection(base_line_down,
+                                                            [shape[config.POINTS_TAG][3], shape[config.POINTS_TAG][0]])
+
 
 
 def append_meters_image_and_info(root_path: str, file_path: str, image_info_list: list):
