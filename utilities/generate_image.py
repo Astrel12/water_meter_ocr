@@ -51,16 +51,18 @@ class FixedGeneratorConfig:
         self.y_displacement = y_displacement
         self.zoom = zoom
 
+
 class ImageWithAnnotation:
     """
     Container for image and its description
     """
 
-    def __init__(self, meter_image, circle_points, shapes, water_meter_class):
+    def __init__(self, meter_image, circle_points, shapes, water_meter_class, json_file):
         self.image = meter_image.copy()
         self.circle_points = circle_points.copy()
         self.shapes = copy.deepcopy(shapes)
         self.class_name = water_meter_class
+        self.json_file = json_file
 
     def set_meter_rectangle(self, x_left, x_right, y_top, y_bottom):
         for shape in self.shapes:
@@ -181,8 +183,9 @@ def draw_shapes(image, shape_list: list):
             color = (0, 0, 255)
             cv2.rectangle(image, integer_points[0], integer_points[1], color, 2)
         label = shape[config.LABEL_TAG]
-        if label != "value":
+        if label != config.VALUE_CLASS_NAME:
             put_text_up_right(image, label, integer_points[-1], cv2.FONT_HERSHEY_SIMPLEX, 1, color, 2)
+        cv2.circle(image, integer_points[-1], 2, (0, 0, 0), -1)
 
 
 def get_water_meter_class(root_path: str, file_path: str) -> str:
@@ -202,6 +205,95 @@ def get_water_meter_class(root_path: str, file_path: str) -> str:
         return os.path.basename(dir_name)
 
 
+def normalize_annotation(image: ImageWithAnnotation):
+    """
+    Corrects some of user errors in annotation: angles inaccuracies, rectangles instead of polygons, polygons start points
+    :param image: container with single water meter image
+    """
+    value_shape = None
+
+    def rect_to_polygon(shape: dict):
+        if len(shape[config.POINTS_TAG]) != 4:
+            print(f'Waring: "{shape[config.LABEL_TAG]}" frame is {shape[config.SHAPE_TYPE_TAG]} with'
+                  f' {len(shape[config.POINTS_TAG])} points (annotation file {image.json_file})')
+            if shape[config.SHAPE_TYPE_TAG] == "rectangle":
+                shape[config.SHAPE_TYPE_TAG] = "polygon"
+                left_top = [min(shape[config.POINTS_TAG][0][0], shape[config.POINTS_TAG][1][0]),
+                            min(shape[config.POINTS_TAG][0][1], shape[config.POINTS_TAG][1][1])]
+                right_bottom = [max(shape[config.POINTS_TAG][0][0], shape[config.POINTS_TAG][1][0]),
+                                max(shape[config.POINTS_TAG][0][1], shape[config.POINTS_TAG][1][1])]
+                points = [left_top, [right_bottom[0], left_top[1]],
+                          right_bottom, [left_top[0], right_bottom[1]]]
+                shape[config.POINTS_TAG] = points
+
+    for shape in image.shapes:
+        if shape[config.LABEL_TAG] != config.METER_CLASS_NAME:
+            rect_to_polygon(shape)
+        if shape[config.LABEL_TAG] == config.VALUE_CLASS_NAME:
+            if value_shape is not None:
+                print(f'Warning: more than one "{config.VALUE_CLASS_NAME}" class in annotation file {image.json_file}')
+                continue
+            value_shape = shape
+    if value_shape is None:
+        print(f'Warning: there is no "{config.VALUE_CLASS_NAME}" class in annotation file {image.json_file}')
+        return
+
+    def reorder_along_line(shape: dict, line):
+        points_num = len(shape[config.POINTS_TAG])
+        if points_num != 4:
+            print(f'Warning: still {len(shape[config.POINTS_TAG])} points in "{shape[config.SHAPE_TYPE_TAG]}" '
+                  f'(annotation: {image.json_file})')
+            return
+
+        def get_poly_edge(index: int):
+            index = index % points_num
+            index2 = (index + 1) % points_num
+            return [shape[config.POINTS_TAG][index], shape[config.POINTS_TAG][index2]]
+
+        line = np.array(line)
+        first_edge = np.array(get_poly_edge(0))
+        second_edge = np.array(get_poly_edge(1))
+
+        cross = np.cross(first_edge[1] - first_edge[0], second_edge[1] - second_edge[0])
+        if cross < 0:
+            print(f'Warning: points order is not clockwise in "{shape[config.SHAPE_TYPE_TAG]}" '
+                  f'(annotation: {image.json_file})')
+            shape[config.POINTS_TAG].reverse()
+            reversed_points = shape[config.POINTS_TAG]
+            shape[config.POINTS_TAG] = reversed_points[3:] + reversed_points[:3]
+
+        first_edge = np.array(get_poly_edge(0))
+        second_edge = np.array(get_poly_edge(1))
+
+        def projection(line_dir: np.array, vector: np.array):
+            return np.dot(line_dir[1] - line_dir[0], vector[1] - vector[0])
+
+        if abs(projection(line, first_edge)) > abs(projection(line, second_edge)):
+            start_index = 0
+        else:
+            start_index = 1
+            first_edge = second_edge
+        second_edge = get_poly_edge(start_index + 2)
+
+        def distance_to_line(line: np.array, point):
+            return np.linalg.norm(np.cross(line[1] - line[0], line[0] - point))/np.linalg.norm(line[1] - line[0])
+
+        distance_to_line1 = distance_to_line(line, first_edge[0]) + distance_to_line(line, first_edge[1])
+        distance_to_line2 = distance_to_line(line, second_edge[0]) + distance_to_line(line, second_edge[1])
+        if distance_to_line1 > distance_to_line2:
+            start_index = start_index + 2
+        if start_index != 0:
+            print(f'Warning: reordering polygon "{shape[config.LABEL_TAG]}" (annotation {image.json_file})"')
+            shape[config.POINTS_TAG] = shape[config.POINTS_TAG][start_index:] + shape[config.POINTS_TAG][:start_index]
+
+    reorder_along_line(value_shape, [[0., 0.], [1., 0.]])
+    base_line = np.array([value_shape[config.POINTS_TAG][0], value_shape[config.POINTS_TAG][1]])
+    for shape in image.shapes:
+        if shape[config.LABEL_TAG] in [config.VALUE_CLASS_NAME, config.METER_CLASS_NAME]:
+            continue
+        reorder_along_line(shape, base_line)
+
+
 def append_meters_image_and_info(root_path: str, file_path: str, image_info_list: list):
     """
     Parses labelme json file, search "meter" objects in it, saves information from json to dict
@@ -218,7 +310,7 @@ def append_meters_image_and_info(root_path: str, file_path: str, image_info_list
                 if shape[config.LABEL_TAG] == config.METER_CLASS_NAME:
                     if shape[config.SHAPE_TYPE_TAG] != config.CIRCLE_SHAPE_TYPE:
                         continue
-                    circle_points = shape[config.POINTS_TAG]
+                    circle_points = shape[config.POINTS_TAG].copy()
                     circle_bounding_rect = circle_to_rect(circle_points)
                     jpg_path = str(pathlib.Path(file_path).with_suffix(".jpg"))
                     meter_whole_image = cv2.imread(jpg_path, cv2.IMREAD_COLOR)
@@ -227,8 +319,12 @@ def append_meters_image_and_info(root_path: str, file_path: str, image_info_list
                                                     circle_bounding_rect[0][0]:circle_bounding_rect[1][0]]
 
                     shapes = select_inside_circle(json_content[config.SHAPE_TAG], circle_points)
-                    shift_shapes(shapes, circle_bounding_rect[0])
-                    image_info_list.append(ImageWithAnnotation(meter_image, circle_points, shapes, water_meter_class))
+                    shift_shape(circle_points, circle_bounding_rect[0])
+                    image_with_info = ImageWithAnnotation(meter_image, circle_points, shapes,
+                                                          water_meter_class, file_path)
+                    shift_shapes(image_with_info.shapes, circle_bounding_rect[0])
+                    normalize_annotation(image_with_info)
+                    image_info_list.append(image_with_info)
 
 
 def is_shape_digit(label):
@@ -298,8 +394,8 @@ def show_demo_window(meter_images: list, background_images: list, character_map:
                                                 generator_config, fixed_config=fixed_config)
         draw_shapes(generated_image.image, generated_image.shapes)
         cv2.imshow(DEMO_WINDOW_NAME, generated_image.image)
-        key = cv2.waitKey(40)
-        if key == 27 or key == 20 or key == 13:
+        key = cv2.waitKey(20)
+        if key == 27 or key == 32 or key == 13:
             break
 
 
@@ -527,7 +623,8 @@ def generate_random_image(meter_images: list, background_images: list, character
         generated_image[:, :, i] = ((np.multiply(background[:, :, i].astype(np.uint16), 255 - mask) +
                                      np.multiply(generated_image[:, :, i].astype(np.uint16), mask)) / 255
                                     ).astype(np.uint8)
-    generated_image_with_annotations = ImageWithAnnotation(generated_image, circle, shapes, image.class_name)
+    generated_image_with_annotations = ImageWithAnnotation(generated_image, circle, shapes,
+                                                           image.class_name, image.json_file)
     for shape in generated_image_with_annotations.shapes:
         points_in = np.array(shape[config.POINTS_TAG]).reshape(-1, 1, 2)
         points_out = cv2.perspectiveTransform(points_in, M)
