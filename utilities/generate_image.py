@@ -14,6 +14,7 @@ import numpy as np
 import random
 from types import SimpleNamespace
 import copy
+from tqdm import tqdm
 
 
 def read_config_file():
@@ -68,6 +69,7 @@ class ImageWithAnnotation:
         for shape in self.shapes:
             if shape[config.LABEL_TAG] == config.METER_CLASS_NAME:
                 shape[config.SHAPE_TYPE_TAG] = "rectangle"
+                shape[config.LABEL_TAG] = self.class_name
                 shape[config.POINTS_TAG] = [[x_left, y_top], [x_right, y_bottom]]
 
 
@@ -185,7 +187,7 @@ def draw_shapes(image, shape_list: list):
         label = shape[config.LABEL_TAG]
         if label != config.VALUE_CLASS_NAME:
             put_text_up_right(image, label, integer_points[-1], cv2.FONT_HERSHEY_SIMPLEX, 1, color, 2)
-        cv2.circle(image, integer_points[-1], 2, (0, 0, 0), -1)
+        cv2.circle(image, integer_points[-1], 4, (0, 0, 0), -1)
 
 
 def get_water_meter_class(root_path: str, file_path: str) -> str:
@@ -234,6 +236,12 @@ def normalize_annotation(image: ImageWithAnnotation):
     value_shape = None
 
     def rect_to_polygon(shape: dict):
+        """
+        Changes labelme shape type from rectangle (2 points) to polygon (4 points)
+
+        Order of points: left top, right top, right bottom, left bottom (top based coordinates)
+        :param shape: input shape to convert
+        """
         if len(shape[config.POINTS_TAG]) != 4:
             print(f'Waring: "{shape[config.LABEL_TAG]}" frame is {shape[config.SHAPE_TYPE_TAG]} with'
                   f' {len(shape[config.POINTS_TAG])} points (annotation file {image.json_file})')
@@ -260,6 +268,12 @@ def normalize_annotation(image: ImageWithAnnotation):
         return
 
     def reorder_along_line(shape: dict, line):
+        """
+        Changes order of points in quadrangle (4 point polygon) so that it is clockwise, and starts from closest to
+        input line edge
+        :param shape: input shape to transform
+        :param line: line in form of two points iterable
+        """
         points_num = len(shape[config.POINTS_TAG])
         if points_num != 4:
             print(f'Warning: still {len(shape[config.POINTS_TAG])} points in "{shape[config.SHAPE_TYPE_TAG]}" '
@@ -277,7 +291,7 @@ def normalize_annotation(image: ImageWithAnnotation):
 
         cross = np.cross(first_edge[1] - first_edge[0], second_edge[1] - second_edge[0])
         if cross < 0:
-            print(f'Warning: points order is not clockwise in "{shape[config.SHAPE_TYPE_TAG]}" '
+            print(f'Warning: points order is not clockwise in "{shape[config.LABEL_TAG]}" '
                   f'(annotation: {image.json_file})')
             shape[config.POINTS_TAG].reverse()
             reversed_points = shape[config.POINTS_TAG]
@@ -318,7 +332,6 @@ def normalize_annotation(image: ImageWithAnnotation):
         if distance_to_line(base_line_down, shape[config.POINTS_TAG][3]) > config.BASE_LINE_DISTANCE_THRESHOLD:
             shape[config.POINTS_TAG][3] = line_intersection(base_line_down,
                                                             [shape[config.POINTS_TAG][3], shape[config.POINTS_TAG][0]])
-
 
 
 def append_meters_image_and_info(root_path: str, file_path: str, image_info_list: list):
@@ -509,7 +522,19 @@ def find_tangent_points_honest(M_quad, R, M, b):
 
 def calculate_transform_parameters(alpha, beta, gamma, x_displacement, y_displacement, zoom_coefficient,
                                    x_c, y_c, R, size):
-
+    """
+    Calculates perspective transform matrix for water meter image projection
+    :param alpha: rotation angle (correspond Oz axis)
+    :param beta: tilt angle (correspond Oy axis)
+    :param gamma: tilt angle (correspond Oz axis)
+    :param x_displacement: fraction of image width, where to place new center of water meter image
+    :param y_displacement: fraction of image height, where to place new center of water meter image
+    :param x_c: x coordinate of source circle
+    :param y_c: y coordinate of source circle
+    :param R: radius of source circle
+    :param size: destination image size
+    :return: tuple: (Transformation matrix, 4 new bounding box coordinates)
+    """
     M_alpha = np.array([[ math.cos(alpha), math.sin(alpha), 0.],
                         [-math.sin(alpha), math.cos(alpha), 0.],
                         [ 0., 0., 1.]])
@@ -547,7 +572,7 @@ def calculate_transform_parameters(alpha, beta, gamma, x_displacement, y_displac
     x_right = (x_right[0] - x_c_new) * zoom + x_displacement
     y_top = (y_top[1] - y_c_new) * zoom + y_displacement
     y_bottom = (y_bottom[1] - y_c_new) * zoom + y_displacement
-    return M, x_left, x_right, y_top, y_bottom
+    return M, (x_left, x_right, y_top, y_bottom)
 
 
 def imprint_random_digit(image, meter_class, shape, character_map):
@@ -597,6 +622,123 @@ def imprint_random_digit(image, meter_class, shape, character_map):
     shape[config.LABEL_TAG] = source_label
 
 
+def digit_shape_inside(shape: list, size) -> bool:
+    """
+    Check if shape with digit label is inside image with input size
+    :param shape: list of points
+    :param size: width, height - list or tuple
+    :return: True, if every point of shape inside image
+    """
+    if is_shape_digit(shape):
+        for point in shape[config.POINTS_TAG]:
+            if point[0] < 0 or point[0] >= size[0] or point[1] < 0 or point[1] >= size[1]:
+                return False
+    return True
+
+
+def get_transformed_image(background: np.array, image: np.array, x_c: float, y_c: float, R: float,
+                          M: np.array, rectangle: tuple, character_map: dict) -> ImageWithAnnotation:
+    """
+    Places image.image to background using perspective transformation matrix M, and transformes all shapes coordinates
+    :param background: background image
+    :param image: ImageWithAnnotation class, describing water meter image
+    :param x_c: x coordinate of water meter circle
+    :param y_c: y coordinate of water meter circle
+    :param R: radius of water meter circle
+    :param M: perspective transformation matrix
+    :param rectangle: bounding box (in form of tuple) for transformed circle after M perspective transform
+    :param character_map: container with digits description on other water meters for random imprinting procedure
+    :return: new ImageWithAnnotation with imprinted water meter and randomly swapped digits. shapes coordinates are
+    properly transformed
+    """
+    size = (background.shape[1], background.shape[0])
+    meter_image = cv2.cvtColor(image.image, cv2.COLOR_BGR2BGRA)
+    mask = np.zeros(image.image.shape[:2], np.uint8)
+    cv2.circle(mask, (int(x_c), int(y_c)), int(R), 255, -1)
+    meter_image[:, :, 3] = mask
+    generated_image = cv2.warpPerspective(meter_image, M, size,
+                                          flags=cv2.INTER_LINEAR, borderMode=cv2.BORDER_CONSTANT,
+                                          borderValue=(0, 0, 0, 0))
+    mask = generated_image[:, :, 3]
+    mask = cv2.blur(mask, (10, 10))
+    for i in range(3):
+        generated_image[:, :, i] = ((np.multiply(background[:, :, i].astype(np.uint16), 255 - mask) +
+                                     np.multiply(generated_image[:, :, i].astype(np.uint16), mask)) / 255
+                                    ).astype(np.uint8)
+    generated_image_with_annotations = ImageWithAnnotation(generated_image, image.circle_points, image.shapes,
+                                                           image.class_name, image.json_file)
+    for shape in generated_image_with_annotations.shapes:
+        points_in = np.array(shape[config.POINTS_TAG]).reshape(-1, 1, 2)
+        points_out = cv2.perspectiveTransform(points_in, M)
+        shape[config.POINTS_TAG] = points_out.reshape(-1, 2).tolist()
+        if is_shape_digit(shape[config.LABEL_TAG]):
+            imprint_random_digit(generated_image_with_annotations.image, image.class_name, shape, character_map)
+
+    generated_image_with_annotations.shapes = \
+        [shape for shape in generated_image_with_annotations.shapes if digit_shape_inside(shape, size)]
+    generated_image_with_annotations.set_meter_rectangle(*rectangle)
+    return generated_image_with_annotations
+
+
+def get_iou(bb1: tuple, bb2: tuple) -> float:
+    """
+    Calculate the Intersection over Union (IoU) of two bounding boxes.
+    Copied (with modifications) from
+    https://stackoverflow.com/questions/25349178/calculating-percentage-of-bounding-box-overlap-for-image-detector-evaluation
+
+    :param bb1: (x1_left, x1_right, y1_top, y1_bottom)
+    :param bb2: (x2_left, x2_right, y2_top, y2_bottom)
+
+    :return:  intersection over union in [0, 1]
+    """
+    x1_left = min(bb1[0], bb1[1])
+    x1_right = max(bb1[0], bb1[1])
+    y1_top = min(bb1[2], bb1[3])
+    y1_bottom = max(bb1[2], bb1[3])
+    x2_left = min(bb2[0], bb2[1])
+    x2_right = max(bb2[0], bb2[1])
+    y2_top = min(bb2[2], bb2[3])
+    y2_bottom = max(bb2[2], bb2[3])
+
+    # determine the coordinates of the intersection rectangle
+    x_left = max(x1_left, x2_left)
+    y_top = max(y1_top, y2_top)
+    x_right = min(x1_right, x2_right)
+    y_bottom = min(y1_bottom, y2_bottom)
+
+    if x_right < x_left or y_bottom < y_top:
+        return 0.0
+
+    # The intersection of two axis-aligned bounding boxes is always an
+    # axis-aligned bounding box
+    intersection_area = (x_right - x_left + 1) * (y_bottom - y_top + 1)
+
+    # compute the area of both AABBs
+    bb1_area = (x1_right - x1_left + 1) * (y1_bottom - y1_top + 1)
+    bb2_area = (x2_right - x2_left + 1) * (y2_bottom - y2_top + 1)
+
+    # compute the intersection over union by taking the intersection
+    # area and dividing it by the sum of prediction + ground-truth
+    # areas - the intersection area
+    iou = intersection_area / float(bb1_area + bb2_area - intersection_area)
+    assert iou >= 0.0
+    assert iou <= 1.0
+    return iou
+
+
+def check_allowed_overlapping(new_box: tuple, boxes: list) -> bool:
+    """
+    Checks if any of bounding box in the list overlaps with newly generated bounding box
+    :param new_box: (x1_left, x1_right, y1_top, y1_bottom) bounding box tuple
+    :param boxes: list of bounding box tuples of same format as new_box
+    :return: True if no overlaps above iou config.MAX_OCCLUSION_IOU threshold
+    """
+    for box in boxes:
+        if get_iou(box, new_box) > config.MAX_OCCLUSION_IOU:
+            return False
+    return True
+
+
 def generate_random_image(meter_images: list, background_images: list, character_map: dict,
                           generator_config: dict = config, fixed_config: FixedGeneratorConfig = None):
     """
@@ -611,56 +753,50 @@ def generate_random_image(meter_images: list, background_images: list, character
     """
     size = tuple(generator_config.GENERATOR_IMAGE_SIZE)
     background_source = random.choice(background_images)
+    bg_width, bg_height = background_source.shape[1], background_source.shape[0]
+    x_left_field = int(random.uniform(0, config.BACKGROUND_RANDOM_CROP_FIELD) * bg_width)
+    x_right_field = bg_width - int(random.uniform(0, config.BACKGROUND_RANDOM_CROP_FIELD) * bg_width)
+    y_top_field = int(random.uniform(0, config.BACKGROUND_RANDOM_CROP_FIELD) * bg_height)
+    y_bottom_field = bg_height - int(random.uniform(0, config.BACKGROUND_RANDOM_CROP_FIELD) * bg_height)
+    background_source = background_source[x_left_field:x_right_field, y_top_field: y_bottom_field]
     background = cv2.resize(background_source, size, cv2.INTER_CUBIC)
     background = cv2.cvtColor(background, cv2.COLOR_BGR2BGRA)
-    image = random.choice(meter_images)
-    meter_image_source, circle, shapes = image.image, image.circle_points, image.shapes
 
-    if fixed_config is None:
-        alpha = random.uniform(config.ALPHA_INTERVAL[0], config.ALPHA_INTERVAL[1])
-        beta = random.uniform(config.BETA_INTERVAL[0], config.BETA_INTERVAL[1])
-        gamma = random.uniform(config.GAMMA_INTERVAL[0], config.GAMMA_INTERVAL[1])
-        x_displacement = random.uniform(config.X_INTERVAL[0], config.X_INTERVAL[1]) * size[0]
-        y_displacement = random.uniform(config.Y_INTERVAL[0], config.Y_INTERVAL[1]) * size[1]
-        zoom_coefficient = random.uniform(config.ZOOM_INTERVAL[0], config.ZOOM_INTERVAL[1])
-    else:
-        alpha = fixed_config.alpha
-        beta = fixed_config.beta
-        gamma = fixed_config.gamma
-        x_displacement = fixed_config.x_displacement * size[0]
-        y_displacement = fixed_config.y_displacement * size[1]
-        zoom_coefficient = fixed_config.zoom
+    image_num = random.choice(range(config.MAX_METERS_IN_IMAGE + 1))
+    all_shapes = []
+    all_boxes = []
+    for i in range(image_num):
+        image = random.choice(meter_images)
 
-    meter_image = cv2.cvtColor(meter_image_source, cv2.COLOR_BGR2BGRA)
-    mask = np.zeros(meter_image_source.shape[:2], np.uint8)
-    x_c = circle[0][0]
-    y_c = circle[0][1]
-    R = math.dist(circle[0], circle[1])
-    cv2.circle(mask, (int(x_c), int(y_c)), int(R), 255, -1)
-    meter_image[:, :, 3] = mask
-    M, x_left, x_right, y_top, y_bottom\
-        = calculate_transform_parameters(alpha, beta, gamma, x_displacement, y_displacement, zoom_coefficient,
-                                         x_c, y_c, R, size)
-    generated_image = cv2.warpPerspective(meter_image, M, size,
-                                          flags=cv2.INTER_LINEAR, borderMode=cv2.BORDER_CONSTANT,
-                                          borderValue=(0, 0, 0, 0))
-    mask = generated_image[:, :, 3]
-    mask = cv2.blur(mask, (10, 10))
-    for i in range(3):
-        generated_image[:, :, i] = ((np.multiply(background[:, :, i].astype(np.uint16), 255 - mask) +
-                                     np.multiply(generated_image[:, :, i].astype(np.uint16), mask)) / 255
-                                    ).astype(np.uint8)
-    generated_image_with_annotations = ImageWithAnnotation(generated_image, circle, shapes,
-                                                           image.class_name, image.json_file)
-    for shape in generated_image_with_annotations.shapes:
-        points_in = np.array(shape[config.POINTS_TAG]).reshape(-1, 1, 2)
-        points_out = cv2.perspectiveTransform(points_in, M)
-        shape[config.POINTS_TAG] = points_out.reshape(-1, 2).tolist()
-        if is_shape_digit(shape[config.LABEL_TAG]):
-            imprint_random_digit(generated_image_with_annotations.image, image.class_name, shape, character_map)
-    generated_image_with_annotations.set_meter_rectangle(x_left, x_right, y_top, y_bottom)
+        if fixed_config is None or i != 0:
+            alpha = random.uniform(config.ALPHA_INTERVAL[0], config.ALPHA_INTERVAL[1])
+            beta = random.uniform(config.BETA_INTERVAL[0], config.BETA_INTERVAL[1])
+            gamma = random.uniform(config.GAMMA_INTERVAL[0], config.GAMMA_INTERVAL[1])
+            x_displacement = random.uniform(config.X_INTERVAL[0], config.X_INTERVAL[1]) * size[0]
+            y_displacement = random.uniform(config.Y_INTERVAL[0], config.Y_INTERVAL[1]) * size[1]
+            zoom_coefficient = random.uniform(config.ZOOM_INTERVAL[0], config.ZOOM_INTERVAL[1])
+        else:
+            alpha = fixed_config.alpha
+            beta = fixed_config.beta
+            gamma = fixed_config.gamma
+            x_displacement = fixed_config.x_displacement * size[0]
+            y_displacement = fixed_config.y_displacement * size[1]
+            zoom_coefficient = fixed_config.zoom
 
-    return generated_image_with_annotations
+        x_c = image.circle_points[0][0]
+        y_c = image.circle_points[0][1]
+        R = math.dist(image.circle_points[0], image.circle_points[1])
+        M, rectangle\
+            = calculate_transform_parameters(alpha, beta, gamma, x_displacement, y_displacement, zoom_coefficient,
+                                             x_c, y_c, R, size)
+        if check_allowed_overlapping(rectangle, all_boxes):
+            generated_image_with_annotations = get_transformed_image(background, image, x_c, y_c, R,
+                                                                     M, rectangle, character_map)
+            background = generated_image_with_annotations.image
+            all_shapes.extend(generated_image_with_annotations.shapes)
+            all_boxes.append(rectangle)
+
+    return ImageWithAnnotation(background[:, :, :3], [], all_shapes, "", "")
 
 
 def main():
@@ -678,6 +814,8 @@ def main():
                         help='Path to dataset folder', required=True)
     parser.add_argument('--output_path', metavar='<output_path>', type=str,
                         help='Path to output folder', required=True)
+    parser.add_argument('--visualize', type=str,
+                        help='Show opencv demo window')
     args = parser.parse_args()
     print(f"Dataset folder: {args.dataset_path}\n"
           f"Background folder: {args.backgrounds_path}\n"
@@ -690,13 +828,36 @@ def main():
     print("Background files: ", background_files)
     backgrounds = []
     meter_images = []
-    for file in background_files:
+    for file in tqdm(background_files, "Reading backgrounds"):
         bg_image = cv2.imread(file, cv2.IMREAD_COLOR)
         backgrounds.append(bg_image)
-    for file in dataset_jsons:
+    for file in tqdm(dataset_jsons, "Reading labelme annotations"):
         append_meters_image_and_info(args.dataset_path, file, meter_images)
     characters_map = collect_chars_map(meter_images)
-    show_demo_window(meter_images, backgrounds, characters_map)
+    if args.visualize:
+        show_demo_window(meter_images, backgrounds, characters_map)
+
+    file_data_template = {
+      "version": "5.1.1",
+      "flags": {},
+      "shapes": [],
+      "imagePath": None,
+      "imageData": None,
+      "imageHeight": -1,
+      "imageWidth": -1
+    }
+    output_path = pathlib.Path(args.output_path)
+    for index in tqdm(range(config.NUM_OF_GENERATED_IMAGES), "Saving files"):
+        image_file_name = f'{index:06d}.jpg'
+        json_file_name = f'{index:06d}.json'
+        image = generate_random_image(meter_images, backgrounds, characters_map)
+        cv2.imwrite(str(output_path/image_file_name), image.image)
+        file_data_template["imagePath"] = image_file_name
+        file_data_template["imageHeight"] = image.image.shape[0]
+        file_data_template["imageWidth"] = image.image.shape[1]
+        file_data_template["shapes"] = image.shapes
+        with open(output_path/json_file_name, "w") as f:
+            json.dump(file_data_template, f, indent=2)
 
 
 if __name__ == '__main__':
