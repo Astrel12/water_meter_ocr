@@ -131,6 +131,9 @@ dmypy.json
 # PyCharm settings files
 .idea/
 
+# VSCode settings files
+.vscode/
+
 .DS_Store
 
 # temporal files

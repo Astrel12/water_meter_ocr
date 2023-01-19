@@ -629,7 +629,7 @@ def digit_shape_inside(shape: list, size) -> bool:
     :param size: width, height - list or tuple
     :return: True, if every point of shape inside image
     """
-    if is_shape_digit(shape):
+    if is_shape_digit(shape[config.LABEL_TAG]):
         for point in shape[config.POINTS_TAG]:
             if point[0] < 0 or point[0] >= size[0] or point[1] < 0 or point[1] >= size[1]:
                 return False
