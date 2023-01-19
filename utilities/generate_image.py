@@ -17,11 +17,11 @@ import copy
 from tqdm import tqdm
 
 
-def read_config_file():
+def read_config_file(config_file=str(os.path.dirname(__file__)) + os.path.sep + 'default_generator_config.json'):
     """
     Function reads config from json file (should be placed in module folder) to structure with correspondent members
     """
-    config_file = str(os.path.dirname(__file__)) + os.path.sep + 'default_generator_config.json'
+
     with open(config_file, 'r') as f:
         config_content = json.load(f, object_hook=lambda d: SimpleNamespace(**d))
     random.seed(config_content.RANDOM_SEED)
@@ -198,6 +198,8 @@ def get_water_meter_class(root_path: str, file_path: str) -> str:
     :return: either first subfolder of dataset root path, or parent folder name of file_path, if root path
     is set directly to folder with json file
     """
+    if not config.ADD_METER_SUBCLASSES:
+        return config.METER_CLASS_NAME
     relative_path = os.path.relpath(file_path, root_path)
     path_parts = relative_path.split(os.sep)
     if len(path_parts) > 1:
@@ -390,6 +392,10 @@ def collect_chars_map(meter_images: list) -> dict:
             if is_shape_digit(label) and '.' not in label:
                 if image.class_name not in char_map.keys():
                     char_map[image.class_name] = dict()
+                if not config.USE_R_DIGIT_PREFIX:
+                    if label.startswith("r"):
+                        label = label[1:]
+                        shape[config.LABEL_TAG] = label
                 if label not in char_map[image.class_name].keys():
                     char_map[image.class_name][label] = list()
                 char_map[image.class_name][label].append((image.image, shape))
@@ -763,6 +769,8 @@ def generate_random_image(meter_images: list, background_images: list, character
     background = cv2.cvtColor(background, cv2.COLOR_BGR2BGRA)
 
     image_num = random.choice(range(config.MAX_METERS_IN_IMAGE + 1))
+    if image_num == 0 and random.uniform(0.0, 1.0) > 0.2:
+        image_num += 1
     all_shapes = []
     all_boxes = []
     for i in range(image_num):
@@ -803,26 +811,40 @@ def main():
     """
     Function to hide variables from global module space
     """
+    global config
 
     parser = argparse.ArgumentParser(description='Takes images from dateset folder, '
                                                  'extracts water meter images from them '
                                                  'using given annotations, places it randomly on '
                                                  'background image, and, finally, stores result into output folder.')
+    parser.add_argument('--config', metavar='<path_to_configfiles>', type=str,
+                        default=None,
+                        help='Path to config file')
     parser.add_argument('--backgrounds_path', metavar='<path_to_backgrounds>', type=str,
-                        help='Path to backgrounds folder', required=True)
+                        default=config.BACKGROUNDS_PATH,
+                        help='Path to backgrounds folder')
     parser.add_argument('--dataset_path', metavar='<path_to_dataset>', type=str,
-                        help='Path to dataset folder', required=True)
+                        default=config.DATASET_PATH,
+                        help='Path to dataset folder')
     parser.add_argument('--output_path', metavar='<output_path>', type=str,
-                        help='Path to output folder', required=True)
+                        default=config.OUTPUT_PATH,
+                        help='Path to output folder')
     parser.add_argument('--visualize', type=str,
                         help='Show opencv demo window')
     args = parser.parse_args()
-    print(f"Dataset folder: {args.dataset_path}\n"
-          f"Background folder: {args.backgrounds_path}\n"
-          f"Output folder: {args.output_path}")
-    dataset_jsons = get_file_list(args.dataset_path, "*.json")
+
+    if args.config:
+        config = read_config_file(args.config)
+    else:
+        config.BACKGROUNDS_PATH = args.backgrounds_path
+        config.DATASET_PATH = args.dataset_path
+        config.OUTPUT_PATH = args.output_path
+    print(f"Dataset folder: {config.DATASET_PATH}\n"
+          f"Background folder: {config.BACKGROUNDS_PATH}\n"
+          f"Output folder: {config.OUTPUT_PATH}")
+    dataset_jsons = get_file_list(config.DATASET_PATH, "*.json")
     dataset_jsons.sort()
-    background_files = get_file_list(args.backgrounds_path, "*.jpg")
+    background_files = get_file_list(config.BACKGROUNDS_PATH, "*.jpg")
     background_files.sort()
     print("Dataset files: ", dataset_jsons)
     print("Background files: ", background_files)
@@ -832,10 +854,10 @@ def main():
         bg_image = cv2.imread(file, cv2.IMREAD_COLOR)
         backgrounds.append(bg_image)
     for file in tqdm(dataset_jsons, "Reading labelme annotations"):
-        append_meters_image_and_info(args.dataset_path, file, meter_images)
+        append_meters_image_and_info(config.DATASET_PATH, file, meter_images)
     characters_map = collect_chars_map(meter_images)
     if args.visualize:
-        show_demo_window(meter_images, backgrounds, characters_map)
+        show_demo_window(meter_images, backgrounds, characters_map, config)
 
     file_data_template = {
       "version": "5.1.1",
@@ -846,11 +868,11 @@ def main():
       "imageHeight": -1,
       "imageWidth": -1
     }
-    output_path = pathlib.Path(args.output_path)
+    output_path = pathlib.Path(config.OUTPUT_PATH)
     for index in tqdm(range(config.NUM_OF_GENERATED_IMAGES), "Saving files"):
         image_file_name = f'{index:06d}.jpg'
         json_file_name = f'{index:06d}.json'
-        image = generate_random_image(meter_images, backgrounds, characters_map)
+        image = generate_random_image(meter_images, backgrounds, characters_map, config)
         cv2.imwrite(str(output_path/image_file_name), image.image)
         file_data_template["imagePath"] = image_file_name
         file_data_template["imageHeight"] = image.image.shape[0]
