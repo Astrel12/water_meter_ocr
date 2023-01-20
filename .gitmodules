@@ -1,0 +1,3 @@
+[submodule "squeezedet-keras"]
+	path = squeezedet-keras
+	url = git@github.com:anakham/squeezedet-keras.git
