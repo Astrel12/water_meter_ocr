@@ -1,0 +1,6 @@
+{
+  "STAGE1_CONFIG" : "../experiments/water_meters/squeeze.config",
+  "STAGE1_CHECKPOINT" : "../experiments/water_meters/model.45-1.14.hdf5",
+  "STAGE2_CONFIG" : "../experiments/water_digits/squeeze.config",
+  "STAGE2_CHECKPOINT" : "../experiments/water_digits/model.134-0.41.hdf5"
+}

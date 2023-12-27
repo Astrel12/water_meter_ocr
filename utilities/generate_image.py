@@ -24,7 +24,8 @@ def read_config_file(config_file=str(os.path.dirname(__file__)) + os.path.sep + 
 
     with open(config_file, 'r') as f:
         config_content = json.load(f, object_hook=lambda d: SimpleNamespace(**d))
-    random.seed(config_content.RANDOM_SEED)
+    if hasattr(config_content, "RANDOM_SEED"):
+        random.seed(config_content.RANDOM_SEED)
     return config_content
 
 
